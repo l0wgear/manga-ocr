@@ -1,13 +1,12 @@
 use std::cell::RefCell;
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 use image::DynamicImage;
-use image::{EncodableLayout, RgbImage, imageops::FilterType};
-use ndarray::{Array4, ArrayD, ArrayViewD, ArrayViewMut, Slice, s};
+use image::{RgbImage, imageops::FilterType};
+use ndarray::{Array4, ArrayD, Slice, s};
 use ndarray::{ArrayView, ShapeError};
 use ndarray_stats::QuantileExt;
 use ort::{
-    environment::Environment,
     session::Session,
     value::{Tensor, TensorRef},
 };
@@ -30,7 +29,6 @@ fn rgb_to_array(img: &RgbImage) -> Result<Array4<f32>, ShapeError> {
         ArrayView::from_shape(shape, raw_data)?.permuted_axes([0, 3, 1, 2]);
 
     // Create a new, owned array by mapping every element from u8 to f32
-    // The `?` operator propagates any error from `from_shape`.
     Ok(view.mapv(|x| x as f32).as_standard_layout().into_owned())
 }
 
@@ -41,7 +39,7 @@ struct ModelDir {
 }
 
 impl ModelDir {
-    fn new(paths: &Vec<PathBuf>) -> anyhow::Result<Self> {
+    fn new(paths: &[PathBuf]) -> anyhow::Result<Self> {
         let mut encoder_path = None;
         let mut decoder_path = None;
         let mut tokenizer_config_path = None;
@@ -147,7 +145,7 @@ impl Encoder {
         let resized = input.resize_exact(224, 224, FilterType::Nearest);
         let resized = resized.to_rgb8();
 
-        let scale = 0.00392156862745098;
+        let scale = 0.003_921_569;
 
         let arr = (rgb_to_array(&resized)? * scale - 0.5) / 0.5;
 
@@ -206,13 +204,16 @@ impl Decoder {
         Ok(Self::new(session, max_end_token_repeats, end_token_ids))
     }
 
-    fn stop_decoding(&self, tokens: &Vec<i64>) -> bool {
+    fn stop_decoding(&self, tokens: &[i64]) -> bool {
         if tokens.len() < self.max_end_token_repeats {
             return false;
         }
         let mut count = 0;
-        for i in tokens.len() - self.max_end_token_repeats..tokens.len() {
-            if self.end_token_ids.contains(&(tokens[i])) {
+        for token in tokens
+            .iter()
+            .skip(tokens.len() - self.max_end_token_repeats)
+        {
+            if self.end_token_ids.contains(token) {
                 count += 1;
             }
         }
@@ -220,8 +221,6 @@ impl Decoder {
     }
 
     pub fn decode(&self, input: ArrayD<f32>, max_tokens: usize) -> anyhow::Result<Vec<i64>> {
-        // let input = ndarray::Array4::<f32>::zeros((1, 64, 64, 3));
-        // let mut output_vec = vec![];
         let mut input_ids = vec![2i64];
         let mut session = self.session.borrow_mut();
         for _ in 0..max_tokens {
