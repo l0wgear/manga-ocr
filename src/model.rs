@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::{path::PathBuf, sync::Arc};
 
 use image::{EncodableLayout, RgbImage, imageops::FilterType};
@@ -43,8 +44,6 @@ impl Encoder {
         let resized = input.resize_exact(224, 224, FilterType::Nearest);
         let resized = resized.to_rgb8();
 
-        resized.save("./test1_out.png");
-
         let scale = 0.00392156862745098;
 
         let arr = (rgb_to_array(&resized)? * scale - 0.5) / 0.5;
@@ -54,11 +53,6 @@ impl Encoder {
             .run(ort::inputs![TensorRef::from_array_view(&arr)?])?;
         Ok(outputs[0].try_extract_array::<f32>()?.to_owned())
     }
-}
-
-pub struct Decoder {
-    session: Session,
-    max_end_token_repeats: usize,
 }
 
 #[derive(Debug)]
@@ -83,34 +77,52 @@ fn last_token_idx(input: ArrayD<f32>) -> Result<i64, DecodeError> {
     Ok(idx as i64)
 }
 
+pub struct Decoder {
+    session: RefCell<Session>,
+    max_end_token_repeats: usize,
+    end_token_ids: Vec<i64>,
+}
+
 impl Decoder {
-    pub fn new(session: Session) -> Self {
+    pub fn new(session: Session, end_token_ids: &[u32]) -> Self {
         Self {
-            session,
+            session: RefCell::new(session),
             max_end_token_repeats: 3,
+            end_token_ids: end_token_ids.iter().map(|i| *i as i64).collect(),
         }
     }
 
-    pub fn decode(&mut self, input: ArrayD<f32>) -> anyhow::Result<Vec<i64>> {
+    fn stop_decoding(&self, tokens: &Vec<i64>) -> bool {
+        if tokens.len() < self.max_end_token_repeats {
+            return false;
+        }
+        let mut count = 0;
+        for i in tokens.len() - self.max_end_token_repeats..tokens.len() {
+            if self.end_token_ids.contains(&(tokens[i])) {
+                count += 1;
+            }
+        }
+        count >= self.max_end_token_repeats
+    }
+
+    pub fn decode(&self, input: ArrayD<f32>, max_tokens: usize) -> anyhow::Result<Vec<i64>> {
         // let input = ndarray::Array4::<f32>::zeros((1, 64, 64, 3));
         // let mut output_vec = vec![];
         let mut input_ids = vec![2i64];
-        for _ in 0..100 {
+        let mut session = self.session.borrow_mut();
+        for _ in 0..max_tokens {
             let input_ref = TensorRef::from_array_view(&input)?;
             let input_ids_tensor = Tensor::from_array(([1, input_ids.len()], input_ids.clone()))?;
-            let outputs = self.session.run(ort::inputs! {
+            let outputs = session.run(ort::inputs! {
                 "encoder_hidden_states" => input_ref,
                 "input_ids" => input_ids_tensor,
             })?;
             let arr = outputs[0].try_extract_array::<f32>()?.to_owned();
-
-            // let shape = arr.shape();
-            // println!("Shape: {:?}", shape);
-            // println!("Item: {:?}", arr[[0, 0, 0]]);
             let idx = last_token_idx(arr)?;
             input_ids.push(idx);
-            // let idx = arr[shape[0] - 1].argmax()
-            // output_vec.push(arr);
+            if self.stop_decoding(&input_ids) {
+                break;
+            }
         }
         Ok(input_ids.clone())
     }
