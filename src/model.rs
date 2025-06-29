@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::{path::PathBuf, sync::Arc};
 
+use image::DynamicImage;
 use image::{EncodableLayout, RgbImage, imageops::FilterType};
 use ndarray::{Array4, ArrayD, ArrayViewD, ArrayViewMut, Slice, s};
 use ndarray::{ArrayView, ShapeError};
@@ -12,6 +13,9 @@ use ort::{
 };
 use std::error::Error;
 use std::fmt::Display;
+use tokenizers::Tokenizer;
+
+use crate::hf::pull_model;
 
 fn rgb_to_array(img: &RgbImage) -> Result<Array4<f32>, ShapeError> {
     let (width, height) = img.dimensions();
@@ -30,17 +34,116 @@ fn rgb_to_array(img: &RgbImage) -> Result<Array4<f32>, ShapeError> {
     Ok(view.mapv(|x| x as f32).as_standard_layout().into_owned())
 }
 
+struct ModelDir {
+    encoder_path: PathBuf,
+    decoder_path: PathBuf,
+    tokenizer_config_path: PathBuf,
+}
+
+impl ModelDir {
+    fn new(paths: &Vec<PathBuf>) -> anyhow::Result<Self> {
+        let mut encoder_path = None;
+        let mut decoder_path = None;
+        let mut tokenizer_config_path = None;
+
+        for p in paths.iter() {
+            if p.ends_with("encoder_model.onnx") {
+                encoder_path = Some(p.clone());
+            }
+            if p.ends_with("decoder_model.onnx") {
+                decoder_path = Some(p.clone());
+            }
+            if p.ends_with("tokenizer.json") {
+                tokenizer_config_path = Some(p.clone());
+            }
+        }
+
+        if encoder_path.is_none() || decoder_path.is_none() || tokenizer_config_path.is_none() {
+            return Err(anyhow::anyhow!(
+                "Missing encoder, decoder, or tokenizer model"
+            ));
+        }
+
+        Ok(Self {
+            encoder_path: encoder_path.unwrap(),
+            decoder_path: decoder_path.unwrap(),
+            tokenizer_config_path: tokenizer_config_path.unwrap(),
+        })
+    }
+}
+
+pub struct OCRModel {
+    encoder: Encoder,
+    decoder: Decoder,
+    tokenizer: Tokenizer,
+}
+
+impl OCRModel {
+    pub fn from_name_or_path(
+        name_or_path: &str,
+        max_end_token_repeats: usize,
+        end_tokens: &str,
+    ) -> anyhow::Result<Self> {
+        ort::init().with_name("OCRModel").commit()?;
+
+        let files = pull_model(name_or_path)?;
+        let model_dir = ModelDir::new(&files)?;
+
+        let tokenizer = Tokenizer::from_file(model_dir.tokenizer_config_path)
+            .map_err(|_| anyhow::Error::msg("Failed to load tokenizer"))?;
+
+        let end_tokens = tokenizer
+            .encode(end_tokens, false)
+            .map_err(|_| anyhow::Error::msg("Failed to encode end token(s)"))?;
+        let end_token_ids = end_tokens.get_ids();
+
+        let encoder = Encoder::from_path(&model_dir.encoder_path)?;
+        let decoder = Decoder::from_path(
+            &model_dir.decoder_path,
+            max_end_token_repeats,
+            end_token_ids,
+        )?;
+        Ok(Self {
+            encoder,
+            decoder,
+            tokenizer,
+        })
+    }
+
+    pub fn run(&self, img: &DynamicImage) -> anyhow::Result<String> {
+        let out = self.encoder.encode(img)?;
+        let dec_out = self.decoder.decode(out, 300)?;
+
+        let idx: Vec<u32> = dec_out.iter().map(|i| *i as u32).collect();
+        let decoded = self.tokenizer.decode(&idx, true);
+
+        if decoded.is_err() {
+            return Err(anyhow::anyhow!("Failed to decode"));
+        }
+        let decoded = decoded.unwrap().replace(" ", "");
+        Ok(decoded)
+    }
+}
+
 pub struct Encoder {
-    session: Session,
+    session: RefCell<Session>,
 }
 
 impl Encoder {
     pub fn new(session: Session) -> Self {
-        Self { session }
+        Self {
+            session: RefCell::new(session),
+        }
     }
 
-    pub fn encode(&mut self, input: image::DynamicImage) -> anyhow::Result<ArrayD<f32>> {
-        // let input = ndarray::Array4::<f32>::zeros((1, 3, 224, 224));
+    pub fn from_path(path: &PathBuf) -> anyhow::Result<Self> {
+        let session = Session::builder()?
+            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?
+            .commit_from_file(path)?;
+        Ok(Self::new(session))
+    }
+
+    pub fn encode(&self, input: &DynamicImage) -> anyhow::Result<ArrayD<f32>> {
         let resized = input.resize_exact(224, 224, FilterType::Nearest);
         let resized = resized.to_rgb8();
 
@@ -48,9 +151,9 @@ impl Encoder {
 
         let arr = (rgb_to_array(&resized)? * scale - 0.5) / 0.5;
 
-        let outputs = self
-            .session
-            .run(ort::inputs![TensorRef::from_array_view(&arr)?])?;
+        let mut session = self.session.borrow_mut();
+
+        let outputs = session.run(ort::inputs![TensorRef::from_array_view(&arr)?])?;
         Ok(outputs[0].try_extract_array::<f32>()?.to_owned())
     }
 }
@@ -84,12 +187,23 @@ pub struct Decoder {
 }
 
 impl Decoder {
-    pub fn new(session: Session, end_token_ids: &[u32]) -> Self {
+    pub fn new(session: Session, max_end_token_repeats: usize, end_token_ids: &[u32]) -> Self {
         Self {
             session: RefCell::new(session),
-            max_end_token_repeats: 3,
+            max_end_token_repeats,
             end_token_ids: end_token_ids.iter().map(|i| *i as i64).collect(),
         }
+    }
+
+    pub fn from_path(
+        path: &PathBuf,
+        max_end_token_repeats: usize,
+        end_token_ids: &[u32],
+    ) -> anyhow::Result<Self> {
+        let session = Session::builder()?
+            .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?
+            .commit_from_file(path)?;
+        Ok(Self::new(session, max_end_token_repeats, end_token_ids))
     }
 
     fn stop_decoding(&self, tokens: &Vec<i64>) -> bool {
