@@ -21,3 +21,9 @@ tokenizers = "0.21.2"
 
 [features]
 hf-tests = []
+
+[profile.release]
+lto = true
+codegen-units = 1
+debug = false
+strip = true
