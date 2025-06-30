@@ -1309,6 +1309,8 @@ dependencies = [
  "ndarray",
  "ndarray-stats",
  "ort",
+ "serde",
+ "serde_json",
  "tokenizers",
 ]
 

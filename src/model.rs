@@ -14,6 +14,7 @@ use std::error::Error;
 use std::fmt::Display;
 use tokenizers::Tokenizer;
 
+use crate::config::GenerationConfig;
 use crate::hf::pull_model;
 
 fn rgb_to_array(img: &RgbImage) -> Result<Array4<f32>, ShapeError> {
@@ -36,6 +37,7 @@ struct ModelDir {
     encoder_path: PathBuf,
     decoder_path: PathBuf,
     tokenizer_config_path: PathBuf,
+    gen_config_path: PathBuf,
 }
 
 impl ModelDir {
@@ -43,6 +45,7 @@ impl ModelDir {
         let mut encoder_path = None;
         let mut decoder_path = None;
         let mut tokenizer_config_path = None;
+        let mut gen_config_path = None;
 
         for p in paths.iter() {
             if p.ends_with("encoder_model.onnx") {
@@ -54,11 +57,18 @@ impl ModelDir {
             if p.ends_with("tokenizer.json") {
                 tokenizer_config_path = Some(p.clone());
             }
+            if p.ends_with("generation_config.json") {
+                gen_config_path = Some(p.clone());
+            }
         }
 
-        if encoder_path.is_none() || decoder_path.is_none() || tokenizer_config_path.is_none() {
+        if encoder_path.is_none()
+            || decoder_path.is_none()
+            || tokenizer_config_path.is_none()
+            || gen_config_path.is_none()
+        {
             return Err(anyhow::anyhow!(
-                "Missing encoder, decoder, or tokenizer model"
+                "Missing encoder, decoder model / tokenizer or generation config"
             ));
         }
 
@@ -66,6 +76,7 @@ impl ModelDir {
             encoder_path: encoder_path.unwrap(),
             decoder_path: decoder_path.unwrap(),
             tokenizer_config_path: tokenizer_config_path.unwrap(),
+            gen_config_path: gen_config_path.unwrap(),
         })
     }
 }
@@ -77,11 +88,7 @@ pub struct OCRModel {
 }
 
 impl OCRModel {
-    pub fn from_name_or_path(
-        name_or_path: &str,
-        max_end_token_repeats: usize,
-        end_tokens: &str,
-    ) -> anyhow::Result<Self> {
+    pub fn from_name_or_path(name_or_path: &str) -> anyhow::Result<Self> {
         ort::init().with_name("OCRModel").commit()?;
 
         let files = pull_model(name_or_path)?;
@@ -90,17 +97,11 @@ impl OCRModel {
         let tokenizer = Tokenizer::from_file(model_dir.tokenizer_config_path)
             .map_err(|_| anyhow::Error::msg("Failed to load tokenizer"))?;
 
-        let end_tokens = tokenizer
-            .encode(end_tokens, false)
-            .map_err(|_| anyhow::Error::msg("Failed to encode end token(s)"))?;
-        let end_token_ids = end_tokens.get_ids();
+        let gen_config = GenerationConfig::from_file(&model_dir.gen_config_path)?;
 
         let encoder = Encoder::from_path(&model_dir.encoder_path)?;
-        let decoder = Decoder::from_path(
-            &model_dir.decoder_path,
-            max_end_token_repeats,
-            end_token_ids,
-        )?;
+        let decoder = Decoder::from_path(&model_dir.decoder_path, gen_config)?;
+
         Ok(Self {
             encoder,
             decoder,
@@ -180,48 +181,40 @@ fn last_token_idx(input: ArrayD<f32>) -> Result<i64, DecodeError> {
 
 pub struct Decoder {
     session: RefCell<Session>,
-    max_end_token_repeats: usize,
-    end_token_ids: Vec<i64>,
+    gen_config: GenerationConfig,
 }
 
 impl Decoder {
-    pub fn new(session: Session, max_end_token_repeats: usize, end_token_ids: &[u32]) -> Self {
+    pub fn new(session: Session, gen_config: GenerationConfig) -> Self {
         Self {
             session: RefCell::new(session),
-            max_end_token_repeats,
-            end_token_ids: end_token_ids.iter().map(|i| *i as i64).collect(),
+            gen_config,
         }
     }
 
-    pub fn from_path(
-        path: &PathBuf,
-        max_end_token_repeats: usize,
-        end_token_ids: &[u32],
-    ) -> anyhow::Result<Self> {
+    pub fn from_path(path: &PathBuf, gen_config: GenerationConfig) -> anyhow::Result<Self> {
         let session = Session::builder()?
             .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?
             .commit_from_file(path)?;
-        Ok(Self::new(session, max_end_token_repeats, end_token_ids))
+        Ok(Self::new(session, gen_config))
     }
 
     fn stop_decoding(&self, tokens: &[i64]) -> bool {
-        if tokens.len() < self.max_end_token_repeats {
+        let max_repeats = self.gen_config.no_repeat_ngram_size as usize;
+        if tokens.len() < max_repeats {
             return false;
         }
         let mut count = 0;
-        for token in tokens
-            .iter()
-            .skip(tokens.len() - self.max_end_token_repeats)
-        {
-            if self.end_token_ids.contains(token) {
+        for token in tokens.iter().skip(tokens.len() - max_repeats) {
+            if *token == self.gen_config.eos_token_id as i64 {
                 count += 1;
             }
         }
-        count >= self.max_end_token_repeats
+        count >= max_repeats
     }
 
     pub fn decode(&self, input: ArrayD<f32>, max_tokens: usize) -> anyhow::Result<Vec<i64>> {
-        let mut input_ids = vec![2i64];
+        let mut input_ids = vec![self.gen_config.decoder_start_token_id as i64];
         let mut session = self.session.borrow_mut();
         for _ in 0..max_tokens {
             let input_ref = TensorRef::from_array_view(&input)?;
