@@ -1,0 +1,8 @@
+{
+  "decoder_start_token_id": 2,
+  "early_stopping": true,
+  "eos_token_id": 3,
+  "length_penalty": 2.0,
+  "no_repeat_ngram_size": 3,
+  "transformers_version": "4.52.4"
+}
