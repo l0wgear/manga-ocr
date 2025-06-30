@@ -5,11 +5,10 @@ mod model;
 use crate::model::OCRModel;
 use arboard::{Clipboard, ImageData};
 use clap::{Parser, ValueEnum};
-use image::{DynamicImage, ImageBuffer, Pixel, RgbImage, Rgba};
+use image::{DynamicImage, ImageBuffer, Rgba};
+use std::fmt::Display;
 use std::hash::{Hash, Hasher};
-use std::{
-    borrow::Cow, fs::File, hash::DefaultHasher, path::PathBuf, thread::sleep, time::Duration,
-};
+use std::{hash::DefaultHasher, path::PathBuf, thread::sleep, time::Duration};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -29,30 +28,27 @@ enum Mode {
     File,
     Clipboard,
 }
-impl ToString for Mode {
-    fn to_string(&self) -> String {
+impl Display for Mode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Mode::File => "file".to_string(),
-            Mode::Clipboard => "clipboard".to_string(),
+            Mode::File => write!(f, "file"),
+            Mode::Clipboard => write!(f, "clipboard"),
         }
     }
 }
 
 fn to_dyn_image(arboard_image: ImageData) -> Option<DynamicImage> {
-    let image_buffer: ImageBuffer<Rgba<u8>, Vec<u8>> = match ImageBuffer::from_raw(
+    let image_buffer: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_raw(
         arboard_image.width as u32,
         arboard_image.height as u32,
         arboard_image.bytes.into_owned(),
-    ) {
-        Some(buffer) => buffer,
-        None => return None,
-    };
+    )?;
 
     // Convert the ImageBuffer to a DynamicImage
     Some(DynamicImage::ImageRgba8(image_buffer))
 }
 
-fn hash(data: &Cow<'_, [u8]>) -> u64 {
+fn hash(data: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
     data.hash(&mut hasher);
     hasher.finish()
@@ -94,10 +90,8 @@ fn main() -> anyhow::Result<()> {
                 let img = img.unwrap();
 
                 let new_hash = hash(&img.bytes);
-                if old_hash.is_some() {
-                    if new_hash == old_hash.unwrap() {
-                        continue;
-                    }
+                if old_hash.is_some() && new_hash == old_hash.unwrap() {
+                    continue;
                 }
                 old_hash = Some(new_hash);
                 let dyn_img = to_dyn_image(img);

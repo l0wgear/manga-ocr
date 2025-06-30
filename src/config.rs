@@ -35,7 +35,7 @@ mod tests {
         assert!(res.is_ok());
         let config = res.unwrap();
         assert_eq!(config.decoder_start_token_id, 2);
-        assert_eq!(config.early_stopping, true);
+        assert!(config.early_stopping);
         assert_eq!(config.eos_token_id, 3);
         assert_eq!(config.length_penalty, 2.0);
         assert_eq!(config.max_length, 300);
