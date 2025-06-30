@@ -12,7 +12,7 @@ pub fn pull_model(name: &str) -> Result<Vec<PathBuf>, ApiError> {
     Ok(local_paths)
 }
 
-#[cfg(all(test, feature = "huggingface-tests"))]
+#[cfg(all(test, feature = "hf-tests"))]
 mod tests {
     use super::*;
 

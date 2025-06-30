@@ -233,3 +233,22 @@ impl Decoder {
         Ok(input_ids.clone())
     }
 }
+
+#[cfg(all(test, feature = "hf-tests"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ocr() {
+        let img = image::ImageReader::open("tests/fixtures/test.png")
+            .unwrap()
+            .decode()
+            .unwrap();
+
+        let model = OCRModel::from_name_or_path("l0wgear/manga-ocr-2025-onnx").unwrap();
+        let output = model.run(&img);
+        assert!(output.is_ok());
+        let output = output.unwrap();
+        assert_eq!(&output, "悪魔との戦い");
+    }
+}

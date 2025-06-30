@@ -3,8 +3,13 @@ mod hf;
 mod model;
 
 use crate::model::OCRModel;
-use clap::Parser;
-use std::path::PathBuf;
+use arboard::{Clipboard, ImageData};
+use clap::{Parser, ValueEnum};
+use image::{DynamicImage, ImageBuffer, Pixel, RgbImage, Rgba};
+use std::hash::{Hash, Hasher};
+use std::{
+    borrow::Cow, fs::File, hash::DefaultHasher, path::PathBuf, thread::sleep, time::Duration,
+};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -13,7 +18,44 @@ struct Args {
     model: String,
 
     #[arg(short, long)]
-    image: PathBuf,
+    image: Option<PathBuf>,
+
+    #[arg(long, default_value_t = Mode::Clipboard)]
+    mode: Mode,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+enum Mode {
+    File,
+    Clipboard,
+}
+impl ToString for Mode {
+    fn to_string(&self) -> String {
+        match self {
+            Mode::File => "file".to_string(),
+            Mode::Clipboard => "clipboard".to_string(),
+        }
+    }
+}
+
+fn to_dyn_image(arboard_image: ImageData) -> Option<DynamicImage> {
+    let image_buffer: ImageBuffer<Rgba<u8>, Vec<u8>> = match ImageBuffer::from_raw(
+        arboard_image.width as u32,
+        arboard_image.height as u32,
+        arboard_image.bytes.into_owned(),
+    ) {
+        Some(buffer) => buffer,
+        None => return None,
+    };
+
+    // Convert the ImageBuffer to a DynamicImage
+    Some(DynamicImage::ImageRgba8(image_buffer))
+}
+
+fn hash(data: &Cow<'_, [u8]>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn main() -> anyhow::Result<()> {
@@ -21,13 +63,56 @@ fn main() -> anyhow::Result<()> {
 
     let model = OCRModel::from_name_or_path(&args.model)?;
 
-    let img = image::ImageReader::open(&args.image)?.decode()?;
-    let text = model.run(&img);
+    match args.mode {
+        Mode::File => {
+            if let Some(path) = args.image {
+                let img = image::ImageReader::open(path)?.decode()?;
+                let text = model.run(&img);
 
-    match text {
-        Ok(text) => println!("{}", text),
-        Err(err) => println!("Error: {:?}", err),
+                match text {
+                    Ok(text) => println!("{}", text),
+                    Err(err) => println!("Error: {:?}", err),
+                }
+            } else {
+                println!("No image provided");
+            }
+        }
+        Mode::Clipboard => {
+            let mut clipboard = Clipboard::new()?;
+            let mut old_hash = match clipboard.get_image() {
+                Ok(img) => Some(hash(&img.bytes)),
+                Err(_) => None,
+            };
+            loop {
+                sleep(Duration::from_secs_f32(1.0));
+
+                let img = clipboard.get_image();
+                if img.is_err() {
+                    // println!("Error getting image from clipboard");
+                    continue;
+                }
+                let img = img.unwrap();
+
+                let new_hash = hash(&img.bytes);
+                if old_hash.is_some() {
+                    if new_hash == old_hash.unwrap() {
+                        continue;
+                    }
+                }
+                old_hash = Some(new_hash);
+                let dyn_img = to_dyn_image(img);
+                if let Some(dyn_img) = dyn_img {
+                    let text = model.run(&dyn_img);
+                    match text {
+                        Ok(text) => {
+                            println!("{}", text);
+                            let _ = clipboard.set_text(text);
+                        }
+                        Err(err) => println!("Error: {:?}", err),
+                    }
+                }
+            }
+        }
     }
-
     Ok(())
 }
