@@ -44,12 +44,16 @@ Options:
   -i, --image <IMAGE>
           Path to the image file to process. Required when --mode is 'file'.
 
-      --mode <MODE>
-          The operating mode.
-          - file: Process a single image file.
-          - clipboard: Watch the clipboard for new images.
-          [default: clipboard]
-          [possible values: file, clipboard]
+  --mode <MODE>
+      The operating mode.
+      - file: Process a single image file.
+      - clipboard: Watch the clipboard for new images.
+      [default: clipboard]
+      [possible values: file, clipboard]
+
+  --refresh-timeout <REFRESH_TIMEOUT>
+          The timeout in seconds for refreshing the clipboard. Only applicable when --mode is 'clipboard'.
+          [default: 1]
 
   -h, --help
           Print help
