@@ -68,7 +68,10 @@ fn main() -> anyhow::Result<()> {
                 if let Some(img) = image {
                     let text = model.run(&img);
                     match text {
-                        Ok(text) => println!("{}", text),
+                        Ok(text) => {
+                            println!("{}", text);
+                            let _ = clipboard.set_text(&text);
+                        }
                         Err(err) => println!("Error: {:?}", err),
                     }
                 }

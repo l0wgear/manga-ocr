@@ -68,4 +68,9 @@ impl ClipboardHandler {
         self.old_hash = Some(new_hash);
         to_dyn_image(image)
     }
+
+    pub fn set_text(&mut self, text: &str) -> anyhow::Result<()> {
+        self.clipboard.set_text(text)?;
+        Ok(())
+    }
 }
