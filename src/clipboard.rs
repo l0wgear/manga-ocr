@@ -35,8 +35,7 @@ impl ClipboardHandler {
     pub fn new(refresh_timeout: f64) -> anyhow::Result<Self> {
         let mut clipboard = Clipboard::new()?;
         let old_hash = match clipboard.get_image() {
-            // Ok(img) => Some(hash(&img.bytes)),
-            Ok(img) => Some(0),
+            Ok(img) => Some(hash(&img.bytes)),
             Err(_) => None,
         };
         Ok(Self {
